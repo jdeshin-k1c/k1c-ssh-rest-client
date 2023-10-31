@@ -164,6 +164,12 @@ bool CAddInNative::OpenSession(tVariant* paParams, const long lSizeArray)
     int port = paParams[1].intVal;
     char *host = ::conv_wchar16_t_to_char(paParams[0].pwstrVal);
 
+    char *user_name = NULL;
+
+    if (TV_VT(&paParams[2]) == VTYPE_PWSTR && paParams[2].strLen > 0) {
+        user_name = ::conv_wchar16_t_to_char(paParams[2].pwstrVal);
+    }
+
     session = ssh_new();
     if (session == NULL) {
         free(host);
@@ -175,6 +181,11 @@ bool CAddInNative::OpenSession(tVariant* paParams, const long lSizeArray)
     free(host);
     ssh_options_set(session, SSH_OPTIONS_LOG_VERBOSITY, &verbosity);
     ssh_options_set(session, SSH_OPTIONS_PORT, &port);
+
+    if(user_name) {
+        ssh_options_set(session, SSH_OPTIONS_USER, user_name);
+        free(user_name);
+    }
 
     int rc = ssh_connect(session);
     if (rc != SSH_OK) {
@@ -199,6 +210,8 @@ bool CAddInNative::CloseSession(void)
 //---------------------------------------------------------------------------//
 bool CAddInNative::VerifyHost(tVariant* pvarRetValue, tVariant* paParams, const long lSizeArray)
 {
+    bool accept_unknown_hosts = paParams[0].bVal;
+    bool update_changed_hosts = paParams[1].bVal;
     enum ssh_known_hosts_e state;
     unsigned char *hash = NULL;
     size_t hlen;
@@ -223,16 +236,63 @@ bool CAddInNative::VerifyHost(tVariant* pvarRetValue, tVariant* paParams, const 
     }
 
     state = ssh_session_is_known_server(session);
+    char *ret_str;
 
-    if (state == SSH_KNOWN_HOSTS_ERROR) {
-        const char * err_str = ssh_get_error(session);
-        std::wstring werr_str = std::wstring(err_str, err_str + strlen(err_str));
-        addError(2004, L"LibSSH", werr_str.data(), 2004);
-        return false;
+    switch (state) {
+        case SSH_KNOWN_HOSTS_OK:
+            /* OK */
+            ret_str = (char *)"SSH_KNOWN_HOSTS_OK";
+            break;
+        case SSH_KNOWN_HOSTS_CHANGED:
+            if(update_changed_hosts) {
+                rc = ssh_session_update_known_hosts(session);
+                if (rc < 0) {
+                    const char * err_str = strerror(errno);
+                    std::wstring werr_str = std::wstring(err_str, err_str + strlen(err_str));
+                    addError(2004, L"LibSSH", werr_str.data(), 2004);
+                    return false;
+                }
+                else
+                    ret_str = (char *)"SSH_KNOWN_HOSTS_OK";
+                break;
+            }
+
+            ret_str = (char *)"SSH_KNOWN_HOSTS_CHANGED";
+            break;
+        case SSH_KNOWN_HOSTS_OTHER:
+            ret_str = (char *)"SSH_KNOWN_HOSTS_OTHER";
+            break;
+        case SSH_KNOWN_HOSTS_NOT_FOUND:
+            ret_str = (char *)"SSH_KNOWN_HOSTS_NOT_FOUND";
+            break;
+        case SSH_KNOWN_HOSTS_UNKNOWN:
+            if(accept_unknown_hosts) {
+                rc = ssh_session_update_known_hosts(session);
+                if (rc < 0) {
+                    const char * err_str = strerror(errno);
+                    std::wstring werr_str = std::wstring(err_str, err_str + strlen(err_str));
+                    addError(2004, L"LibSSH", werr_str.data(), 2004);
+                    return false;
+                }
+                else ret_str = (char *)"SSH_KNOWN_HOSTS_OK";
+                break;
+            }
+            ret_str = (char *)"SSH_KNOWN_HOSTS_UNKNOWN";
+            break;
+        case SSH_KNOWN_HOSTS_ERROR:
+            const char * err_str = ssh_get_error(session);
+            std::wstring werr_str = std::wstring(err_str, err_str + strlen(err_str));
+            addError(2004, L"LibSSH", werr_str.data(), 2004);
+            return false;
+    };
+
+    TV_VT(pvarRetValue) = VTYPE_PWSTR;
+
+    std::wstring wret_str = std::wstring(ret_str, ret_str + strlen(ret_str));
+    if (m_iMemory->AllocMemory((void**)&(pvarRetValue->pwstrVal), (unsigned)(wret_str.size() + 1) * sizeof(WCHAR_T))) {
+        ::convToShortWchar(&(pvarRetValue->pwstrVal), wret_str.data());
+        pvarRetValue->wstrLen = wret_str.length();
     }
-
-    TV_VT(pvarRetValue) = VTYPE_I4;
-    TV_I4(pvarRetValue) = (int)state;
 
     return true;
 }
@@ -1076,11 +1136,11 @@ long CAddInNative::GetNParams(const long lMethodNum)
 { 
     switch(lMethodNum) {
         case eOpenSessionMethod:
-            return 2;
+            return 3;
         case eCloseSessionMethod:
             return 0;
         case eVerifyHostMethod:
-            return 0;
+            return 2;
         case eAuthenticateByPasswordMethod:
             return 2;
         case eAuthenticateByKeyMethod:
